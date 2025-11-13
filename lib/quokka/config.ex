@@ -154,6 +154,7 @@ defmodule Quokka.Config do
         pipe_chain_start_excluded_functions: credo_opts[:pipe_chain_start_excluded_functions] || [],
         pipe_chain_start_flag: credo_opts[:pipe_chain_start_flag] || false,
         piped_function_exclusions: piped_function_exclusions,
+        remove_unused_aliases: quokka_config[:remove_unused_aliases] || false,
         rewrite_multi_alias: credo_opts[:rewrite_multi_alias] || false,
         single_pipe_flag: credo_opts[:single_pipe_flag] || false,
         sort_order: credo_opts[:sort_order] || :alpha,
@@ -273,6 +274,10 @@ defmodule Quokka.Config do
 
   def refactor_pipe_chain_starts?() do
     get(:pipe_chain_start_flag)
+  end
+
+  def remove_unused_aliases?() do
+    get(:remove_unused_aliases)
   end
 
   def rewrite_multi_alias?() do

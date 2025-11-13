@@ -255,6 +255,7 @@ defmodule Quokka.Style.ModuleDirectives do
         {k, v} ->
           {k, Enum.reverse(v)}
       end)
+      |> remove_unused_aliases()
       |> lift_aliases()
 
     # Not happy with it, but this does the work to move module attribute assignments above the module or quote or whatever
@@ -315,6 +316,93 @@ defmodule Quokka.Style.ModuleDirectives do
       |> Zipper.insert_siblings(nondirectives)
     end
   end
+
+  defp remove_unused_aliases(%{alias: aliases, nondirectives: nondirectives} = acc) do
+    if Quokka.Config.remove_unused_aliases?() do
+      dealiases = AliasEnv.define(aliases)
+
+      # Find which aliases are actually used in the code (including other directives)
+      # We need to check all directives that might reference the aliases
+      directives_to_check =
+        ~w(behaviour use import)a
+        |> Enum.map(&Map.get(acc, &1, []))
+        |> List.flatten()
+
+      all_code = nondirectives ++ directives_to_check
+      used_aliases = find_used_aliases(all_code, dealiases)
+
+      # Filter out unused aliases
+      filtered_aliases =
+        Enum.filter(aliases, fn
+          {:alias, _, [{:__aliases__, _, alias_modules}]} ->
+            # For regular aliases like `alias Foo.Bar`, check if the short form (last part) is used
+            is_used_by_short_form(alias_modules, used_aliases)
+
+          {:alias, _, [{:__aliases__, _, _alias_modules}, opts]} when is_list(opts) ->
+            # For aliases with `as:` like `alias Foo.Bar, as: Baz`, check if the `as` name is used
+            # The opts are in block-formatted keywords: [{:__block__, [format: :keyword, ...], [:as]}, {:__aliases__, _, [as_name]}]
+            case find_as_value(opts) do
+              {:__aliases__, _, [as_name]} when is_atom(as_name) ->
+                MapSet.member?(used_aliases, as_name)
+
+              _ ->
+                # Unknown format, keep it
+                true
+            end
+
+          _other ->
+            # Keep other forms (dynamic, __MODULE__, etc.)
+            true
+        end)
+
+      %{acc | alias: filtered_aliases}
+    else
+      acc
+    end
+  end
+
+  defp find_as_value(opts) do
+    Enum.find_value(opts, nil, fn
+      {{:__block__, _, [:as]}, value} -> value
+      _ -> nil
+    end)
+  end
+
+  defp find_used_aliases(ast, _dealiases) do
+    ast
+    |> Zipper.zip()
+    |> Zipper.reduce_while(%MapSet{}, fn
+      {{:__aliases__, _, modules_list}, _} = zipper, used ->
+        # Check alias usage - only single-atom references count as using an alias
+        # Multi-part fully qualified names (like Foo.Bar) are not considered alias usage
+        used =
+          case modules_list do
+            [single] when is_atom(single) ->
+              # Single-part aliases like `Foo.baz()` - definitely using the alias
+              MapSet.put(used, single)
+
+            _other ->
+              # Multi-part aliases like `Foo.Bar.baz()` - not an alias usage (fully qualified)
+              used
+          end
+
+        {:cont, zipper, used}
+
+      zipper, used ->
+        {:cont, zipper, used}
+    end)
+  end
+
+  defp is_used_by_short_form([single_alias], used_aliases) when is_atom(single_alias) do
+    MapSet.member?(used_aliases, single_alias)
+  end
+
+  defp is_used_by_short_form([_ | _rest] = modules, used_aliases) when is_list(modules) do
+    last = List.last(modules)
+    is_atom(last) and MapSet.member?(used_aliases, last)
+  end
+
+  defp is_used_by_short_form(_modules, _used_aliases), do: false
 
   defp lift_aliases(%{alias: aliases, nondirectives: nondirectives} = acc) do
     # we can't use the dealias map built into state as that's what things look like before sorting

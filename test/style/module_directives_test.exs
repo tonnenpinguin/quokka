@@ -701,4 +701,286 @@ defmodule Quokka.Style.ModuleDirectivesTest do
       )
     end
   end
+
+  describe "remove unused aliases" do
+    setup do
+      stub(Quokka.Config, :remove_unused_aliases?, fn -> true end)
+      :ok
+    end
+
+    test "removes alias that is not used" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar
+          alias Baz.Qux
+
+          def foo do
+            Bar.baz()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Foo.Bar
+
+          def foo() do
+            Bar.baz()
+          end
+        end
+        """
+      )
+    end
+
+    test "keeps alias that is used by short form" do
+      assert_style("""
+      defmodule Foo do
+        alias Foo.Bar
+
+        def foo() do
+          Bar.baz()
+        end
+      end
+      """)
+    end
+
+    test "removes alias only used in fully qualified name" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar
+
+          def foo do
+            Foo.Bar.baz()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          def foo() do
+            Foo.Bar.baz()
+          end
+        end
+        """
+      )
+    end
+
+    test "removes multiple unused aliases" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar
+          alias Baz.Qux
+          alias Hello.World
+          alias Used.Module
+
+          def foo do
+            Module.do_something()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Used.Module
+
+          def foo() do
+            Module.do_something()
+          end
+        end
+        """
+      )
+    end
+
+    test "handles aliases with as: keyword" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar, as: MyBar
+          alias Baz.Qux, as: MyQux
+
+          def foo do
+            MyBar.baz()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Foo.Bar, as: MyBar
+
+          def foo() do
+            MyBar.baz()
+          end
+        end
+        """
+      )
+    end
+
+    test "alias with as: is not used if only short form used (without as)" do
+      # The short form Bar is used, but since the alias was `as: MyBar`,
+      # the alias is not actually being used, and Bar refers to the full qualified name
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar, as: MyBar
+
+          def foo do
+            MyBar.baz()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Foo.Bar, as: MyBar
+
+          def foo() do
+            MyBar.baz()
+          end
+        end
+        """
+      )
+    end
+
+    test "keeps aliases used in multiple places" do
+      assert_style("""
+      defmodule Foo do
+        alias Foo.Bar
+
+        def foo() do
+          Bar.baz()
+          Bar.qux()
+        end
+
+        def bar() do
+          Bar.other()
+        end
+      end
+      """)
+    end
+
+    test "keeps aliases used in @derive" do
+      assert_style("""
+      defmodule Foo do
+        alias Foo.Encoder
+
+        @derive {Encoder, []}
+        defstruct [:a]
+      end
+      """)
+    end
+
+    test "respects configuration flag" do
+      stub(Quokka.Config, :remove_unused_aliases?, fn -> false end)
+
+      # When remove_unused_aliases is false, aliases are still sorted but not removed
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar
+          alias Baz.Qux
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Baz.Qux
+          alias Foo.Bar
+        end
+        """
+      )
+    end
+
+    test "removes aliases with mixed usage patterns" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Used
+          alias Foo.Unused
+          alias Bar.OnlyFullyQualified
+
+          def foo do
+            Used.call()
+            Bar.OnlyFullyQualified.call()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Foo.Used
+
+          def foo() do
+            Used.call()
+            Bar.OnlyFullyQualified.call()
+          end
+        end
+        """
+      )
+    end
+
+    test "handles nested modules" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar.Baz
+          alias Unused.Nested.Module
+
+          def foo do
+            Baz.call()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Foo.Bar.Baz
+
+          def foo() do
+            Baz.call()
+          end
+        end
+        """
+      )
+    end
+
+    test "keeps all aliases when all are used" do
+      assert_style("""
+      defmodule Foo do
+        alias Bar.B
+        alias Baz.C
+        alias Foo.A
+
+        def foo() do
+          A.call()
+          B.call()
+          C.call()
+        end
+      end
+      """)
+    end
+
+    test "handles aliases in multiple directive groups" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Used.A
+          alias Unused.B
+          require Used.C
+          alias Unused.D
+
+          def foo do
+            A.call()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Used.A
+
+          require Used.C
+
+          def foo() do
+            A.call()
+          end
+        end
+        """
+      )
+    end
+  end
 end
