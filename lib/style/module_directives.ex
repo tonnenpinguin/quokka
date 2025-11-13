@@ -112,9 +112,14 @@ defmodule Quokka.Style.ModuleDirectives do
   def run({{directive, _, children}, _} = zipper, ctx) when directive in @directives and is_list(children) do
     # Need to be careful that we aren't getting false positives on variables or fns like `def import(foo)` or `alias = 1`
     case Style.ensure_block_parent(zipper) do
-      {:ok, zipper} -> {:skip, zipper |> Zipper.up() |> organize_directives(), ctx}
+      {:ok, parent_zipper} ->
+        # Check if we're inside a quote block, and pass that info to organize_directives
+        in_quote = is_directly_inside_quote?(parent_zipper)
+        {:skip, parent_zipper |> Zipper.up() |> organize_directives(nil, in_quote), ctx}
+
       # not actually a directive! carry on.
-      :error -> {:cont, zipper, ctx}
+      :error ->
+        {:cont, zipper, ctx}
     end
   end
 
@@ -162,6 +167,20 @@ defmodule Quokka.Style.ModuleDirectives do
   # a dynamic module name, like `defmodule my_variable do ... end`
   defp moduledoc(_), do: nil
 
+  # Check if a zipper is inside a quote block by walking up the tree
+  defp is_directly_inside_quote?(zipper) do
+    # Walk up the tree looking for a quote node, but stop at module/def boundaries
+    zipper
+    |> Stream.iterate(&Zipper.up/1)
+    |> Enum.take_while(& &1)
+    |> Enum.any?(fn z ->
+      case Zipper.node(z) do
+        {:quote, _, _} -> true
+        _ -> false
+      end
+    end)
+  end
+
   @acc %{
     shortdoc: [],
     moduledoc: [],
@@ -201,7 +220,7 @@ defmodule Quokka.Style.ModuleDirectives do
     end
   end
 
-  defp organize_directives(parent, moduledoc \\ nil) do
+  defp organize_directives(parent, moduledoc \\ nil, in_quote \\ false) do
     {before, _after} = Enum.split_while(Quokka.Config.strict_module_layout_order(), &(&1 != :alias))
 
     acc =
@@ -255,7 +274,7 @@ defmodule Quokka.Style.ModuleDirectives do
         {k, v} ->
           {k, Enum.reverse(v)}
       end)
-      |> remove_unused_aliases()
+      |> remove_unused_aliases(in_quote)
       |> lift_aliases()
 
     # Not happy with it, but this does the work to move module attribute assignments above the module or quote or whatever
@@ -317,8 +336,8 @@ defmodule Quokka.Style.ModuleDirectives do
     end
   end
 
-  defp remove_unused_aliases(%{alias: aliases, nondirectives: nondirectives} = acc) do
-    if Quokka.Config.remove_unused_aliases?() do
+  defp remove_unused_aliases(%{alias: aliases, nondirectives: nondirectives} = acc, in_quote) do
+    if Quokka.Config.remove_unused_aliases?() and not in_quote do
       dealiases = AliasEnv.define(aliases)
 
       # Find which aliases are actually used in the code (including other directives)
@@ -331,19 +350,25 @@ defmodule Quokka.Style.ModuleDirectives do
       all_code = nondirectives ++ directives_to_check
       used_aliases = find_used_aliases(all_code, dealiases)
 
+      # Find aliases that are defined inside quote blocks
+      aliases_in_quote = find_aliases_in_quote_blocks(nondirectives)
+
       # Filter out unused aliases
       filtered_aliases =
         Enum.filter(aliases, fn
           {:alias, _, [{:__aliases__, _, alias_modules}]} ->
             # For regular aliases like `alias Foo.Bar`, check if the short form (last part) is used
-            is_used_by_short_form(alias_modules, used_aliases)
+            short_form = List.last(alias_modules)
+
+            is_used_by_short_form(alias_modules, used_aliases) or
+              MapSet.member?(aliases_in_quote, short_form)
 
           {:alias, _, [{:__aliases__, _, _alias_modules}, opts]} when is_list(opts) ->
             # For aliases with `as:` like `alias Foo.Bar, as: Baz`, check if the `as` name is used
             # The opts are in block-formatted keywords: [{:__block__, [format: :keyword, ...], [:as]}, {:__aliases__, _, [as_name]}]
             case find_as_value(opts) do
               {:__aliases__, _, [as_name]} when is_atom(as_name) ->
-                MapSet.member?(used_aliases, as_name)
+                MapSet.member?(used_aliases, as_name) or MapSet.member?(aliases_in_quote, as_name)
 
               _ ->
                 # Unknown format, keep it
@@ -366,6 +391,60 @@ defmodule Quokka.Style.ModuleDirectives do
       {{:__block__, _, [:as]}, value} -> value
       _ -> nil
     end)
+  end
+
+  # Find all aliases defined inside quote blocks in a list of AST nodes
+  defp find_aliases_in_quote_blocks(ast_list) when is_list(ast_list) do
+    ast_list
+    |> Enum.reduce(MapSet.new(), fn node, acc ->
+      collect_quote_aliases(node, acc)
+    end)
+  end
+
+  # Recursively collect aliases from quote blocks in an AST node
+  defp collect_quote_aliases(ast, acc) do
+    case ast do
+      {:quote, _, _} = quote_node ->
+        aliases_from_quote = collect_aliases_in_ast(quote_node)
+        MapSet.union(acc, aliases_from_quote)
+
+      # Recursively check nested structures
+      {_tag, _meta, children} when is_list(children) ->
+        Enum.reduce(children, acc, &collect_quote_aliases/2)
+
+      list when is_list(list) ->
+        Enum.reduce(list, acc, fn
+          {key, value}, acc when is_atom(key) -> collect_quote_aliases(value, acc)
+          item, acc -> collect_quote_aliases(item, acc)
+        end)
+
+      _ ->
+        acc
+    end
+  end
+
+  # Collect all alias names from an AST node
+  defp collect_aliases_in_ast(ast) do
+    {_ast, aliases} =
+      Macro.prewalk(ast, MapSet.new(), fn
+        {:alias, _, [{:__aliases__, _, alias_modules}]}, acc ->
+          short_form = List.last(alias_modules)
+          {nil, MapSet.put(acc, short_form)}
+
+        {:alias, _, [{:__aliases__, _, _}, opts]}, acc when is_list(opts) ->
+          case find_as_value(opts) do
+            {:__aliases__, _, [as_name]} when is_atom(as_name) ->
+              {nil, MapSet.put(acc, as_name)}
+
+            _ ->
+              {nil, acc}
+          end
+
+        ast_node, acc ->
+          {ast_node, acc}
+      end)
+
+    aliases
   end
 
   defp find_used_aliases(ast, _dealiases) do

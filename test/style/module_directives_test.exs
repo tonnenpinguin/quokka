@@ -815,6 +815,27 @@ defmodule Quokka.Style.ModuleDirectivesTest do
       )
     end
 
+    test "does not remove aliases if used in quote block" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar
+
+          quote do
+            alias Bax.Qux
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          quote do
+            alias Bax.Qux
+          end
+        end
+        """
+      )
+    end
+
     test "alias with as: is not used if only short form used (without as)" do
       # The short form Bar is used, but since the alias was `as: MyBar`,
       # the alias is not actually being used, and Bar refers to the full qualified name
