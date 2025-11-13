@@ -452,16 +452,21 @@ defmodule Quokka.Style.ModuleDirectives do
     |> Zipper.zip()
     |> Zipper.reduce_while(%MapSet{}, fn
       {{:__aliases__, _, modules_list}, _} = zipper, used ->
-        # Check alias usage - only single-atom references count as using an alias
-        # Multi-part fully qualified names (like Foo.Bar) are not considered alias usage
+        # Check alias usage - track all atomic references that could be aliases
+        # For a reference like `Bar.Baz`, the first component `Bar` could be an alias to something like `Foo.Bar`
+        # We track the first component to determine if such an alias is being used
         used =
           case modules_list do
             [single] when is_atom(single) ->
-              # Single-part aliases like `Foo.baz()` - definitely using the alias
+              # Single-part references like `Foo.baz()` - definitely using an alias if one exists for `Foo`
               MapSet.put(used, single)
 
+            [first | _rest] when is_atom(first) ->
+              # Multi-part references like `Foo.Bar.baz()` - track the first component
+              # This may or may not be an alias usage depending on the aliasing configuration
+              MapSet.put(used, first)
+
             _other ->
-              # Multi-part aliases like `Foo.Bar.baz()` - not an alias usage (fully qualified)
               used
           end
 

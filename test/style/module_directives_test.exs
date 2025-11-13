@@ -732,6 +732,32 @@ defmodule Quokka.Style.ModuleDirectivesTest do
       )
     end
 
+    test "handles nested aliases" do
+      assert_style(
+        """
+        defmodule Foo do
+          alias Foo.Bar
+          alias Unused.Nested.Module
+
+          def foo do
+            Bar.Baz.call()
+            Bar.Foo.call()
+          end
+        end
+        """,
+        """
+        defmodule Foo do
+          alias Foo.Bar
+
+          def foo() do
+            Bar.Baz.call()
+            Bar.Foo.call()
+          end
+        end
+        """
+      )
+    end
+
     test "keeps alias that is used by short form" do
       assert_style("""
       defmodule Foo do
